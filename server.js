@@ -11,7 +11,8 @@ const io = socketIo(server, {
  cors: {
     origin: [
       "http://localhost:4200",
-      /\.ngrok-free\.app$/
+      /\.ngrok-free\.app$/,
+      "https://sorapara.netlify.app"
     ],
     methods: ["GET", "POST"],
     credentials: true

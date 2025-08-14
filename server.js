@@ -25,11 +25,14 @@ app.use(express.json());
 const users = new Map();
 const waitingQueue = [];
 const chatRooms = new Map();
+const groupChatUsers = new Set();
+const typingUsers = new Map(); // roomId -> Set of typing users
 
 class User {
-  constructor(socketId, name) {
+  constructor(socketId, name, mode = 'one-to-one') {
     this.id = socketId;
     this.name = name;
+    this.mode = mode;
     this.partner = null;
     this.room = null;
   }
@@ -45,30 +48,30 @@ function findPartner(currentUser) {
   // Find a partner from the waiting queue
   if (waitingQueue.length > 0) {
     const partner = waitingQueue.shift();
-
+    
     // Create a chat room
     const roomId = `room_${currentUser.id}_${partner.id}`;
-
+    
     // Set up the partnership
     currentUser.partner = partner;
     currentUser.room = roomId;
     partner.partner = currentUser;
     partner.room = roomId;
-
+    
     // Store the room
     chatRooms.set(roomId, { user1: currentUser, user2: partner });
-
+    
     // Join both users to the room
     io.sockets.sockets.get(currentUser.id)?.join(roomId);
     io.sockets.sockets.get(partner.id)?.join(roomId);
-
+    
     // Notify both users
     io.to(currentUser.id).emit('partnerFound', { id: partner.id, name: partner.name });
     io.to(partner.id).emit('partnerFound', { id: currentUser.id, name: currentUser.name });
-
+    
     return true;
   }
-
+  
   return false;
 }
 
@@ -76,18 +79,18 @@ function removeUserFromPartnership(user) {
   if (user.partner) {
     const partner = user.partner;
     const roomId = user.room;
-
+    
     // Notify partner that user left
     if (io.sockets.sockets.get(partner.id)) {
       io.to(partner.id).emit('partnerLeft');
     }
-
+    
     // Clean up the partnership
     partner.partner = null;
     partner.room = null;
     user.partner = null;
     user.room = null;
-
+    
     // Remove from chat rooms
     if (roomId) {
       chatRooms.delete(roomId);
@@ -105,52 +108,116 @@ function removeUserFromQueue(userId) {
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
 
-  socket.on('setUsername', (userName) => {
-    console.log(`User ${socket.id} set username: ${userName}`);
-
+  socket.on('setUsername', (data) => {
+    const { userName, mode } = data;
+    console.log(`User ${socket.id} set username: ${userName}, mode: ${mode}`);
+    
     // Create user object
-    const user = new User(socket.id, userName.trim());
+    const user = new User(socket.id, userName.trim(), mode);
     users.set(socket.id, user);
-
-    // Try to find a partner
-    const foundPartner = findPartner(user);
-
-    if (!foundPartner) {
-      // No partner found, add to waiting queue
-      waitingQueue.push(user);
-      socket.emit('waiting');
-      console.log(`User ${userName} added to waiting queue. Queue length: ${waitingQueue.length}`);
+    
+    if (mode === 'group') {
+      // Join group chat
+      const roomId = 'publicGroup';
+      user.room = roomId;
+      socket.join(roomId);
+      groupChatUsers.add(user);
+      
+      // Initialize typing users for this room if not exists
+      if (!typingUsers.has(roomId)) {
+        typingUsers.set(roomId, new Set());
+      }
+      
+      console.log(`User ${userName} joined group chat. Total group users: ${groupChatUsers.size}`);
+    } else {
+      // Try to find a partner for one-to-one chat
+      const foundPartner = findPartner(user);
+      
+      if (!foundPartner) {
+        // No partner found, add to waiting queue
+        waitingQueue.push(user);
+        socket.emit('waiting');
+        console.log(`User ${userName} added to waiting queue. Queue length: ${waitingQueue.length}`);
+      }
     }
   });
 
   socket.on('sendMessage', (messageContent) => {
     const user = users.get(socket.id);
-
+    
     if (user && user.partner && user.room) {
+      // One-to-one chat
       const message = {
         senderName: user.name,
         content: messageContent,
         timestamp: new Date()
       };
-
+      
       // Send message to partner only
       socket.to(user.partner.id).emit('message', message);
       console.log(`Message sent from ${user.name} to ${user.partner.name}: ${messageContent}`);
+    } else if (user && user.mode === 'group' && user.room === 'publicGroup') {
+      // Group chat
+      const message = {
+        senderName: user.name,
+        content: messageContent,
+        timestamp: new Date()
+      };
+      
+      // Broadcast message to all users in group chat except sender
+      socket.to('publicGroup').emit('message', message);
+      console.log(`Group message sent from ${user.name}: ${messageContent}`);
+    }
+  });
+
+  socket.on('typing', () => {
+    const user = users.get(socket.id);
+    
+    if (user) {
+      if (user.mode === 'group' && user.room === 'publicGroup') {
+        // Group chat typing
+        const roomTypingUsers = typingUsers.get('publicGroup');
+        if (roomTypingUsers) {
+          roomTypingUsers.add(user.name);
+          socket.to('publicGroup').emit('typing', { userName: user.name });
+        }
+      } else if (user.partner && user.room) {
+        // One-to-one chat typing
+        socket.to(user.partner.id).emit('typing', { userName: user.name });
+      }
+    }
+  });
+
+  socket.on('stopTyping', () => {
+    const user = users.get(socket.id);
+    
+    if (user) {
+      if (user.mode === 'group' && user.room === 'publicGroup') {
+        // Group chat stop typing
+        const roomTypingUsers = typingUsers.get('publicGroup');
+        if (roomTypingUsers) {
+          roomTypingUsers.delete(user.name);
+          socket.to('publicGroup').emit('stopTyping');
+        }
+      } else if (user.partner && user.room) {
+        // One-to-one chat stop typing
+        socket.to(user.partner.id).emit('stopTyping');
+      }
     }
   });
 
   socket.on('findNewPartner', () => {
     const user = users.get(socket.id);
-
-    if (user) {
+    
+    if (user && user.mode !== 'group') {
       console.log(`User ${user.name} looking for new partner`);
-
+      
       // Remove from current partnership
       removeUserFromPartnership(user);
-
+      
       // Try to find a new partner
       const foundPartner = findPartner(user);
-
+      
       if (!foundPartner) {
         // No partner found, add to waiting queue
         waitingQueue.push(user);
@@ -162,21 +229,31 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log(`User disconnected: ${socket.id}`);
-
+    
     const user = users.get(socket.id);
-
+    
     if (user) {
       console.log(`User ${user.name} disconnected`);
-
-      // Remove from partnership if exists
-      removeUserFromPartnership(user);
-
-      // Remove from waiting queue
-      removeUserFromQueue(socket.id);
-
+      
+      if (user.mode === 'group') {
+        // Remove from group chat
+        groupChatUsers.delete(user);
+        const roomTypingUsers = typingUsers.get('publicGroup');
+        if (roomTypingUsers) {
+          roomTypingUsers.delete(user.name);
+        }
+        console.log(`User ${user.name} left group chat. Remaining group users: ${groupChatUsers.size}`);
+      } else {
+        // Remove from partnership if exists
+        removeUserFromPartnership(user);
+        
+        // Remove from waiting queue
+        removeUserFromQueue(socket.id);
+      }
+      
       // Remove from users map
       users.delete(socket.id);
-
+      
       console.log(`Remaining users: ${users.size}, Waiting queue: ${waitingQueue.length}`);
     }
   });

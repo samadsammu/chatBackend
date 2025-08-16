@@ -9,11 +9,12 @@ const server = http.createServer(app);
 // Configure CORS for Socket.IO
 const io = socketIo(server, {
   cors: {
-    origin: [
-      "http://localhost:4200",
-      /\.ngrok-free\.app$/,
-      "https://sorapara.netlify.app"
-    ],
+ origin: [
+  "http://localhost:4200",
+  /\.ngrok-free\.app$/,
+  "https://sorapara.netlify.app",
+  "https://sorapara.online"
+],
     methods: ["GET", "POST"],
     credentials: true
   }
